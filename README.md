@@ -21,6 +21,8 @@ upstream key failover.
 - Automatic failover on quota/usage-exhausted `429` responses
 - Cyclic key selection: after the last key, rotation loops back to the first
 - Inferred key status endpoint at `/admin/status`
+- Active validation endpoint at `/admin/validate-keys`
+- Unauthenticated readiness endpoint at `/readyz`
 - SMTP notifications when a key is exhausted and when all keys are exhausted
 - YAML config file support with environment-variable overrides
 - Configurable max request body size
@@ -48,6 +50,9 @@ When an upstream key returns a quota/usage-exhausted `429`, Switchboard Go marks
 that key as exhausted, sends a best-effort SMTP notification, and retries the
 same request with the next non-exhausted key. If every key is exhausted, it
 returns an OpenAI-style `429` JSON error.
+
+Authentication failures on `/v1/*` and `/admin/*` return an OpenAI-style JSON
+error envelope with HTTP 401.
 
 ## Requirements
 
@@ -233,6 +238,9 @@ curl -N http://127.0.0.1:8080/v1/chat/completions \
 
 `/admin/status` returns inferred key state and the active key index.
 
+`unknown` means the key is configured but has not yet been validated or used
+since startup.
+
 ```bash
 curl http://127.0.0.1:8080/admin/status \
   -H "Authorization: Bearer $PROXY_API_KEY"
@@ -266,6 +274,16 @@ Key states are inferred by this proxy:
 - `available`: key is currently selected and not marked exhausted
 - `exhausted`: key returned a quota/usage-exhausted `429`
 
+### Validate keys
+
+`POST /admin/validate-keys` actively checks every configured upstream key against
+`/models`, updates in-memory key state, and returns per-key validation results.
+
+```bash
+curl -X POST http://127.0.0.1:8080/admin/validate-keys \
+  -H "Authorization: Bearer $PROXY_API_KEY"
+```
+
 ## Usage and quota visibility
 
 OpenCode Go currently does not appear to expose a public API endpoint for
@@ -275,6 +293,12 @@ reports that through `/admin/status`.
 
 If a public usage/quota endpoint becomes available, it can be added without
 changing the client-facing OpenAI-compatible API.
+
+## Readiness
+
+`/readyz` is unauthenticated. It returns JSON, verifies required config is loaded,
+and checks the currently selected non-exhausted upstream key by calling
+`/models` with a 5 second timeout.
 
 ## SMTP notifications
 
@@ -340,6 +364,20 @@ docker run --rm \
 The Docker image uses a multi-stage Go build and a distroless non-root runtime
 image.
 
+### GHCR
+
+The repo includes a workflow that publishes images to:
+
+```text
+ghcr.io/<owner>/switchboard-go
+```
+
+Example pull:
+
+```bash
+docker pull ghcr.io/<owner>/switchboard-go:latest
+```
+
 ## Deployment
 
 ### Build a binary
@@ -379,6 +417,17 @@ sudo systemctl enable --now switchboard-go
 sudo systemctl status switchboard-go
 ```
 
+## validate-config
+
+Run a config-only check without starting the server:
+
+```bash
+switchboard-go validate-config
+```
+
+It loads config using normal precedence, validates required values, and prints a
+safe summary.
+
 Example `/etc/switchboard-go/switchboard.env`:
 
 ```bash
@@ -407,6 +456,8 @@ sudo chmod 600 /etc/switchboard-go/config.yaml /etc/switchboard-go/switchboard.e
 
 ## Operational behavior
 
+- Startup logs include listen address, upstream base URL, upstream key count,
+  SMTP configured yes/no, config source path, and max request body bytes.
 - Request bodies larger than `max_request_body_bytes` are rejected with HTTP
   `413`.
 - Hop-by-hop and proxy headers are stripped when forwarding.

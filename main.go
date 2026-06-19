@@ -30,6 +30,7 @@ type Config struct {
 	ProxyAPIKey         string
 	UpstreamAPIKeys     []string
 	MaxRequestBodyBytes int64
+	ConfigSourcePath    string
 
 	SMTP SMTPConfig
 }
@@ -55,15 +56,10 @@ func loadConfig() (Config, error) {
 			return Config{}, err
 		}
 		mergeConfig(&cfg, fileCfg)
+		cfg.ConfigSourcePath = path
 	}
 	applyEnvOverrides(&cfg)
-	if strings.TrimSpace(cfg.ProxyAPIKey) == "" {
-		return Config{}, errors.New("PROXY_API_KEY is required")
-	}
-	if len(cfg.UpstreamAPIKeys) == 0 {
-		return Config{}, errors.New("OPENCODE_GO_API_KEYS is required")
-	}
-	return cfg, nil
+	return cfg, validateConfig(cfg)
 }
 
 func defaultConfig() Config {
@@ -219,6 +215,33 @@ func applyEnvOverrides(cfg *Config) {
 	}
 }
 
+func defaultString(v, d string) string {
+	if strings.TrimSpace(v) == "" {
+		return d
+	}
+	return v
+}
+
+func validateConfig(cfg Config) error {
+	if strings.TrimSpace(cfg.ProxyAPIKey) == "" {
+		return errors.New("PROXY_API_KEY is required")
+	}
+	if len(cfg.UpstreamAPIKeys) == 0 {
+		return errors.New("OPENCODE_GO_API_KEYS is required")
+	}
+	if strings.TrimSpace(cfg.UpstreamBaseURL) == "" {
+		return errors.New("UPSTREAM_BASE_URL is required")
+	}
+	if cfg.MaxRequestBodyBytes <= 0 {
+		return errors.New("MAX_REQUEST_BODY_BYTES must be > 0")
+	}
+	return nil
+}
+
+func safeConfigSummary(cfg Config) string {
+	return fmt.Sprintf("listen=%s upstream=%s upstream_keys=%d smtp_configured=%t config_source=%s max_request_body_bytes=%d", cfg.ListenAddr, cfg.UpstreamBaseURL, len(cfg.UpstreamAPIKeys), cfg.SMTP.Host != "" && cfg.SMTP.From != "" && cfg.SMTP.To != "", defaultString(cfg.ConfigSourcePath, "none"), cfg.MaxRequestBodyBytes)
+}
+
 func parseBool(v string) bool { b, _ := strconv.ParseBool(strings.TrimSpace(v)); return b }
 
 type KeyState string
@@ -347,8 +370,25 @@ func (m *KeyManager) Status() StatusResponse {
 		}
 		states[i] = PerKeyStatus{Index: i, State: string(state), Last429Time: m.last429String(i), Current: i == m.current}
 	}
-	return StatusResponse{CurrentKeyIndex: m.current, Keys: states, Note: "Remaining usage is unavailable from opencode-go API."}
+	return StatusResponse{CurrentKeyIndex: m.current, Keys: states, Note: "unknown means the key has not yet been validated or used since startup; remaining usage is unavailable from opencode-go API."}
 }
+
+func (m *KeyManager) SetState(i int, state KeyState) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if i < 0 || i >= len(m.states) {
+		return
+	}
+	m.states[i] = state
+	if state == KeyExhausted {
+		m.last429[i] = time.Now().UTC()
+	}
+	if state != KeyExhausted && m.current == i {
+		m.current = i
+	}
+}
+
+func (m *KeyManager) MarkAvailable(i int) { m.SetState(i, KeyAvailable) }
 
 func (m *KeyManager) last429String(i int) string {
 	if t, ok := m.last429[i]; ok && !t.IsZero() {
@@ -369,6 +409,17 @@ type StatusResponse struct {
 	Note            string         `json:"note"`
 }
 
+type ValidateKeyResult struct {
+	Index  int    `json:"index"`
+	State  string `json:"state"`
+	Status int    `json:"status"`
+	Error  string `json:"error,omitempty"`
+}
+
+type ValidateKeysResponse struct {
+	Results []ValidateKeyResult `json:"results"`
+}
+
 type App struct {
 	config Config
 	keys   *KeyManager
@@ -385,15 +436,17 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case r.URL.Path == "/healthz":
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
+	case r.URL.Path == "/readyz":
+		a.handleReadyz(w, r)
 	case strings.HasPrefix(r.URL.Path, "/admin/"):
 		if !a.authOK(r) {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			writeOpenAIError(w, http.StatusUnauthorized, "invalid_api_key", "Unauthorized")
 			return
 		}
 		a.handleAdmin(w, r)
 	case strings.HasPrefix(r.URL.Path, "/v1/"):
 		if !a.authOK(r) {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			writeOpenAIError(w, http.StatusUnauthorized, "invalid_api_key", "Unauthorized")
 			return
 		}
 		a.proxyV1(w, r)
@@ -418,8 +471,111 @@ func bearerToken(v string) string {
 }
 
 func (a *App) handleAdmin(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path == "/admin/validate-keys" {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		a.handleValidateKeys(w, r)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(a.keys.Status())
+}
+
+func (a *App) handleReadyz(w http.ResponseWriter, r *http.Request) {
+	resp := map[string]any{"ready": false}
+	if err := validateConfig(a.config); err != nil {
+		writeJSON(w, http.StatusServiceUnavailable, resp)
+		return
+	}
+	_, key, ok := a.keys.Current()
+	if !ok {
+		writeJSON(w, http.StatusServiceUnavailable, resp)
+		return
+	}
+	if err := a.checkUpstreamReady(r.Context(), key); err != nil {
+		resp["error"] = "upstream not ready"
+		writeJSON(w, http.StatusServiceUnavailable, resp)
+		return
+	}
+	resp["ready"] = true
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func writeJSON(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(v)
+}
+
+func (a *App) checkUpstreamReady(ctx context.Context, key string) error {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(a.config.UpstreamBaseURL, "/")+"/models", nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+key)
+	req.Header.Set("User-Agent", "OpenAI/Python 1.0.0")
+	resp, err := a.client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		return nil
+	}
+	return fmt.Errorf("upstream status %d", resp.StatusCode)
+}
+
+func (a *App) handleValidateKeys(w http.ResponseWriter, r *http.Request) {
+	results := make([]ValidateKeyResult, 0, len(a.config.UpstreamAPIKeys))
+	for i, key := range a.config.UpstreamAPIKeys {
+		res := ValidateKeyResult{Index: i}
+		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(a.config.UpstreamBaseURL, "/")+"/models", nil)
+		if err != nil {
+			cancel()
+			res.State = string(KeyUnknown)
+			res.Status = http.StatusBadGateway
+			res.Error = err.Error()
+			results = append(results, res)
+			continue
+		}
+		req.Header.Set("Authorization", "Bearer "+key)
+		req.Header.Set("User-Agent", "OpenAI/Python 1.0.0")
+		resp, err := a.client.Do(req)
+		cancel()
+		if err != nil {
+			res.State = string(KeyUnknown)
+			res.Status = http.StatusBadGateway
+			res.Error = err.Error()
+			results = append(results, res)
+			continue
+		}
+		res.Status = resp.StatusCode
+		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			io.Copy(io.Discard, resp.Body)
+			resp.Body.Close()
+			a.keys.MarkAvailable(i)
+			res.State = string(KeyAvailable)
+		} else if resp.StatusCode == http.StatusTooManyRequests && isQuota429(resp) {
+			io.Copy(io.Discard, resp.Body)
+			resp.Body.Close()
+			a.keys.SetState(i, KeyExhausted)
+			res.State = string(KeyExhausted)
+			res.Error = "quota exhausted"
+		} else {
+			io.Copy(io.Discard, resp.Body)
+			resp.Body.Close()
+			a.keys.SetState(i, KeyUnknown)
+			res.State = string(KeyUnknown)
+			res.Error = fmt.Sprintf("status %d", resp.StatusCode)
+		}
+		results = append(results, res)
+	}
+	writeJSON(w, http.StatusOK, ValidateKeysResponse{Results: results})
 }
 
 func (a *App) proxyV1(w http.ResponseWriter, r *http.Request) {
@@ -491,6 +647,14 @@ func (a *App) doUpstream(ctx context.Context, r *http.Request, body []byte, key 
 	}
 	stripHopByHopHeaders(req.Header)
 	return a.client.Do(req)
+}
+
+func (a *App) validateConfigAndPrint() error {
+	if err := validateConfig(a.config); err != nil {
+		return err
+	}
+	log.Println(safeConfigSummary(a.config))
+	return nil
 }
 
 func copyHeaders(dst, src http.Header) {
@@ -636,6 +800,17 @@ var sendMail = func(addr string, auth smtp.Auth, from string, to []string, msg [
 }
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "validate-config" {
+		cfg, err := loadConfig()
+		if err != nil {
+			log.Fatal(err)
+		}
+		if err := validateConfig(cfg); err != nil {
+			log.Fatal(err)
+		}
+		log.Println(safeConfigSummary(cfg))
+		return
+	}
 	cfg, err := loadConfig()
 	if err != nil {
 		log.Fatal(err)
@@ -650,7 +825,7 @@ func main() {
 		defer cancel()
 		_ = srv.Shutdown(shut)
 	}()
-	log.Printf("listening on %s", cfg.ListenAddr)
+	log.Printf("startup listen_addr=%s upstream_base_url=%s upstream_keys=%d smtp_configured=%t config_source=%s max_request_body_bytes=%d", cfg.ListenAddr, cfg.UpstreamBaseURL, len(cfg.UpstreamAPIKeys), cfg.SMTP.Host != "" && cfg.SMTP.From != "" && cfg.SMTP.To != "", defaultString(cfg.ConfigSourcePath, "none"), cfg.MaxRequestBodyBytes)
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatal(err)
 	}
