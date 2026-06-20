@@ -31,20 +31,6 @@ Download a binary from GitHub Releases:
 https://github.com/ArsalanDotMe/switchboard-go/releases
 ```
 
-Linux/macOS one-liner:
-
-```bash
-mkdir -p "$HOME/.local/bin" && curl -L "https://github.com/ArsalanDotMe/switchboard-go/releases/download/v1.0.0/switchboard-go_$(uname -s)_$(uname -m | sed 's/aarch64/arm64/').tar.gz" | tar -xz -C "$HOME/.local/bin" switchboard-go
-```
-
-Make sure `~/.local/bin` is in your `PATH`.
-
-Or build from source:
-
-```bash
-go build -o switchboard-go .
-```
-
 ## Quick start
 
 ```bash
@@ -53,15 +39,6 @@ export OPENCODE_GO_API_KEYS="sk-first,sk-second,sk-third"
 export LISTEN_ADDR="127.0.0.1:8080"
 
 switchboard-go
-```
-
-In another terminal:
-
-```bash
-curl http://127.0.0.1:8080/healthz
-
-curl http://127.0.0.1:8080/v1/models \
-  -H "Authorization: Bearer $PROXY_API_KEY"
 ```
 
 ## Use it from an OpenAI-compatible client
