@@ -109,7 +109,7 @@ Create or edit `~/.pi/agent/models.json`:
 {
   "providers": {
     "opencode-go": {
-      "baseUrl": "http://127.0.0.1:8080/v1",
+      "baseUrl": "http://127.0.0.1:8080",
       "apiKey": "$SWITCHBOARD_PROXY_API_KEY",
       "compat": {
         "supportsDeveloperRole": false
@@ -154,6 +154,6 @@ OpenAI-compatible route, so this flag is required.
 
 This setup exposes Pi's built-in `opencode-go` model list through Switchboard.
 Models that Pi sends through its OpenAI-compatible implementation work with
-Switchboard's `/v1/chat/completions` endpoint. Models that Pi sends through an
-Anthropic Messages implementation work with Switchboard's `/v1/messages`
-endpoint.
+Switchboard's `/chat/completions` or `/v1/chat/completions` endpoint. Models
+that Pi sends through an Anthropic Messages implementation work with
+Switchboard's `/v1/messages` endpoint.

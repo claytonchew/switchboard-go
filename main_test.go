@@ -78,6 +78,29 @@ func TestRequestTooLargeReturns413(t *testing.T) {
 	}
 }
 
+func TestRootOpenAIPathProxies(t *testing.T) {
+	var gotPath, gotAuth string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer upstream.Close()
+
+	app := newApp(Config{ProxyAPIKey: "p", UpstreamAPIKeys: []string{"u"}, UpstreamBaseURL: upstream.URL, MaxRequestBodyBytes: 1024})
+	req := httptest.NewRequest(http.MethodPost, "/chat/completions", strings.NewReader(`{"model":"glm-5.1","messages":[]}`))
+	req.Header.Set("Authorization", "Bearer p")
+	rec := httptest.NewRecorder()
+	app.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d body %s", rec.Code, rec.Body.String())
+	}
+	if gotPath != "/chat/completions" || gotAuth != "Bearer u" {
+		t.Fatalf("unexpected upstream path=%q auth=%q", gotPath, gotAuth)
+	}
+}
+
 func TestDoUpstreamSetsDefaultUserAgent(t *testing.T) {
 	var gotUA string
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -179,6 +202,25 @@ func TestAuthFailureReturnsOpenAIJSON(t *testing.T) {
 func TestAuthFailureReturnsAnthropicJSON(t *testing.T) {
 	app := newApp(Config{ProxyAPIKey: "p", UpstreamAPIKeys: []string{"u"}, UpstreamBaseURL: "http://example.com", MaxRequestBodyBytes: 1})
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+	req.Header.Set("anthropic-version", "2023-06-01")
+	rec := httptest.NewRecorder()
+	app.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("got %d", rec.Code)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	errObj, ok := payload["error"].(map[string]any)
+	if payload["type"] != "error" || !ok || errObj["type"] != "authentication_error" {
+		t.Fatalf("unexpected payload: %#v", payload)
+	}
+}
+
+func TestRootAnthropicAuthFailureReturnsAnthropicJSON(t *testing.T) {
+	app := newApp(Config{ProxyAPIKey: "p", UpstreamAPIKeys: []string{"u"}, UpstreamBaseURL: "http://example.com", MaxRequestBodyBytes: 1})
+	req := httptest.NewRequest(http.MethodPost, "/messages", nil)
 	req.Header.Set("anthropic-version", "2023-06-01")
 	rec := httptest.NewRecorder()
 	app.ServeHTTP(rec, req)

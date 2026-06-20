@@ -10,12 +10,16 @@ OpenAI/Anthropic-compatible tool -> Switchboard Go -> https://opencode.ai/zen/go
 ```
 
 Incoming `/v1` paths are stripped before forwarding to the configured upstream
-base URL:
+base URL. Root OpenAI-compatible paths are also accepted for clients that expect
+their base URL to omit `/v1`:
 
 ```text
 GET  /v1/models           -> GET  https://opencode.ai/zen/go/v1/models
 POST /v1/chat/completions -> POST https://opencode.ai/zen/go/v1/chat/completions
 POST /v1/messages         -> POST https://opencode.ai/zen/go/v1/messages
+GET  /models              -> GET  https://opencode.ai/zen/go/v1/models
+POST /chat/completions    -> POST https://opencode.ai/zen/go/v1/chat/completions
+POST /messages            -> POST https://opencode.ai/zen/go/v1/messages
 ```
 
 When an upstream key returns a quota/usage-exhausted `429`, Switchboard Go marks

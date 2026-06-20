@@ -451,7 +451,7 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		a.handleAdmin(w, r)
-	case strings.HasPrefix(r.URL.Path, "/v1/"):
+	case isProxyPath(r.URL.Path):
 		if !a.authOK(r) {
 			writeAPIError(w, apiStyleForRequest(r), http.StatusUnauthorized, "invalid_api_key", "Unauthorized")
 			return
@@ -475,6 +475,18 @@ func bearerToken(v string) string {
 		return strings.TrimSpace(parts[1])
 	}
 	return ""
+}
+
+func isProxyPath(path string) bool {
+	if strings.HasPrefix(path, "/v1/") {
+		return true
+	}
+	switch path {
+	case "/models", "/chat/completions", "/messages", "/complete":
+		return true
+	default:
+		return false
+	}
 }
 
 func (a *App) handleAdmin(w http.ResponseWriter, r *http.Request) {
