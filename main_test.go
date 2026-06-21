@@ -199,6 +199,31 @@ func TestAuthFailureReturnsOpenAIJSON(t *testing.T) {
 	}
 }
 
+func TestAuthOKConstantTimeCompare(t *testing.T) {
+	app := newApp(Config{ProxyAPIKey: "p", UpstreamAPIKeys: []string{"u"}, UpstreamBaseURL: "http://example.com", MaxRequestBodyBytes: 1})
+	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	req.Header.Set("Authorization", "Bearer p")
+	rec := httptest.NewRecorder()
+	app.ServeHTTP(rec, req)
+	if rec.Code == http.StatusUnauthorized {
+		t.Fatalf("expected non-401 for correct bearer, got %d", rec.Code)
+	}
+	req2 := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	req2.Header.Set("Authorization", "Bearer wrong")
+	rec2 := httptest.NewRecorder()
+	app.ServeHTTP(rec2, req2)
+	if rec2.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 for wrong bearer, got %d", rec2.Code)
+	}
+	req3 := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	req3.Header.Set("x-api-key", "p")
+	rec3 := httptest.NewRecorder()
+	app.ServeHTTP(rec3, req3)
+	if rec3.Code == http.StatusUnauthorized {
+		t.Fatalf("expected non-401 for correct x-api-key, got %d", rec3.Code)
+	}
+}
+
 func TestAuthFailureReturnsAnthropicJSON(t *testing.T) {
 	app := newApp(Config{ProxyAPIKey: "p", UpstreamAPIKeys: []string{"u"}, UpstreamBaseURL: "http://example.com", MaxRequestBodyBytes: 1})
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
