@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/subtle"
 	"crypto/tls"
 	"encoding/json"
 	"errors"
@@ -463,10 +464,14 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) authOK(r *http.Request) bool {
-	if tok := bearerToken(r.Header.Get("Authorization")); tok != "" && tok == a.config.ProxyAPIKey {
-		return true
+	want := a.config.ProxyAPIKey
+	if want == "" {
+		return false
 	}
-	return strings.TrimSpace(r.Header.Get("x-api-key")) == a.config.ProxyAPIKey
+	if tok := bearerToken(r.Header.Get("Authorization")); tok != "" {
+		return subtle.ConstantTimeCompare([]byte(tok), []byte(want)) == 1
+	}
+	return subtle.ConstantTimeCompare([]byte(r.Header.Get("x-api-key")), []byte(want)) == 1
 }
 
 func bearerToken(v string) string {
